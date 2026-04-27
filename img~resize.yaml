@@ -1,0 +1,112 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Image Resizing using S3 + Lambda
+
+Resources:
+
+  BigImageBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: big-image-abhi123
+
+  SmallImageBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: small-image-abhi123
+
+  ImageLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: image-lambda
+      Runtime: python3.9
+      Handler: index.lambda_handler
+
+      # ? Attach your Pillow Layer
+      Layers:
+        # - arn:aws:lambda:us-east-1:876762732827:layer:pillowog:1
+        # - arn:aws:lambda:us-east-1:876762732827:layer:axllinux:1
+        - arn:aws:lambda:us-east-1:770693421928:layer:Klayers-p39-pillow:1
+
+      InlineCode: |
+        import json
+        import boto3
+        import io
+        import urllib.parse
+        from PIL import Image
+
+        s3 = boto3.client('s3')
+
+        def lambda_handler(event, context):
+            source_bucket = "big-image-abhi123"
+            dest_bucket = "small-image-abhi123"
+
+            file_key = urllib.parse.unquote_plus(
+                event['Records'][0]['s3']['object']['key']
+            )
+
+            print("Processing:", file_key)
+
+            if not file_key.lower().endswith(('.png', '.jpg', '.jpeg')):
+                print("Not an image, skipping")
+                return
+
+            response = s3.get_object(Bucket=source_bucket, Key=file_key)
+            image_content = response['Body'].read()
+
+            image = Image.open(io.BytesIO(image_content))
+
+            print("Original mode:", image.mode)
+
+            image = image.resize((200, 200))
+
+            ext = file_key.lower().split('.')[-1]
+
+            if ext == "png":
+                image_format = "PNG"
+                content_type = "image/png"
+            else:
+                image_format = "JPEG"
+                content_type = "image/jpeg"
+
+            # handle PNG transparency
+            if image.mode in ("RGBA", "P"):
+                image = image.convert("RGB")
+
+            buffer = io.BytesIO()
+            image.save(buffer, format=image_format)
+            buffer.seek(0)
+
+            print("Uploading to:", dest_bucket)
+
+            s3.put_object(
+                Bucket=dest_bucket,
+                Key=file_key,
+                Body=buffer,
+                ContentType=content_type
+            )
+
+            print("Upload successful")
+
+      MemorySize: 256
+      Timeout: 15
+
+      Policies:
+        - S3ReadPolicy:
+            BucketName: big-image-abhi123
+        - S3WritePolicy:
+            BucketName: small-image-abhi123
+
+      Events:
+        UploadTrigger:
+          Type: S3
+          Properties:
+            Bucket: !Ref BigImageBucket
+            Events: s3:ObjectCreated:*
+
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: image-lambda
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceArn: arn:aws:s3:::big-image-abhi123
